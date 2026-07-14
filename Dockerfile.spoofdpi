@@ -1,0 +1,22 @@
+# SpoofDPI has no official container image, so we fetch the release binary for
+# the build platform's architecture. TARGETARCH is provided automatically by
+# BuildKit (amd64 / arm64 / arm cover typical home servers and Pis).
+FROM alpine:3.20
+
+ARG SPOOFDPI_VERSION=1.5.3
+ARG TARGETARCH
+
+RUN apk add --no-cache ca-certificates wget \
+    && case "$TARGETARCH" in \
+         amd64) asset="linux_x86_64" ;; \
+         arm64) asset="linux_arm64" ;; \
+         arm)   asset="linux_arm" ;; \
+         *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
+       esac \
+    && wget -qO /tmp/spoofdpi.tar.gz \
+         "https://github.com/xvzc/SpoofDPI/releases/download/v${SPOOFDPI_VERSION}/spoofdpi_${SPOOFDPI_VERSION}_${asset}.tar.gz" \
+    && tar -xzf /tmp/spoofdpi.tar.gz -C /usr/local/bin spoofdpi \
+    && rm /tmp/spoofdpi.tar.gz \
+    && apk del wget
+
+ENTRYPOINT ["/usr/local/bin/spoofdpi"]

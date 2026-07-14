@@ -1,0 +1,37 @@
+services:
+  video-grab:
+    build: .
+    container_name: video-grab_server
+    ports:
+      - '8000:8000'
+    environment:
+      - API_KEY=${API_KEY:?set API_KEY in .env}
+      - MAX_HEIGHT=1080
+      - FILE_TTL_SECONDS=3600
+      - DELIVERED_GRACE_SECONDS=600
+      - MAX_CONCURRENT_DOWNLOADS=2
+      - YTDLP_PROXY=http://spoofdpi:8080
+      # Enables age-restricted / login-gated downloads (e.g. 18+ tweets).
+      # Put a cookies.txt in ./cookies/ ; if absent, it's simply ignored.
+      - COOKIES_FILE=/cookies/cookies.txt
+    volumes:
+      - /usb/video-grab:/data
+      - ./cookies:/cookies:ro
+    depends_on:
+      - spoofdpi
+    restart: unless-stopped
+    networks:
+      - proxy
+
+  spoofdpi:
+    build:
+      context: .
+      dockerfile: Dockerfile.spoofdpi
+    container_name: spoofdpi
+    command: ['--no-tui', '--listen-addr', '0.0.0.0:8080']
+    restart: unless-stopped
+    networks:
+      - proxy
+networks:
+  proxy:
+    external: true
