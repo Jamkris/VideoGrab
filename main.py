@@ -76,38 +76,50 @@ def notify(message: str) -> None:
 
 
 def run_ytdlp(url: str, opts: dict) -> dict:
-    """Download `url` with yt-dlp, escalating through three strategies:
+    """Download `url` with yt-dlp, escalating through several strategies.
 
-    1. Plain generic/site extractor.
-    2. Chrome impersonation, for sites that reject non-browser TLS clients.
-    3. Resolver fallback, for pages that hide an HLS stream in a nested player
-       iframe with disguised extensions — we scrape the real stream URL and
-       feed it back to yt-dlp with the page as Referer.
+    The proxy is applied only as a fallback, not by default: most sites
+    (YouTube, X/Twitter) work — and authenticate — better on a direct
+    connection, and routing them through the DPI-bypass proxy can break login.
+    Only ISP-blocked sites need it, so we try direct first and reach for the
+    proxy afterwards.
+
+    Order: direct → direct+Chrome-impersonation → proxied → proxied+impersonation
+    → resolver fallback (scrape an HLS stream out of a nested player iframe).
     """
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            return ydl.extract_info(url, download=True)
-    except yt_dlp.utils.DownloadError as first_err:
-        from yt_dlp.networking.impersonate import ImpersonateTarget
+    from yt_dlp.networking.impersonate import ImpersonateTarget
 
+    chrome = ImpersonateTarget("chrome")
+    variants = [{}, {"impersonate": chrome}]
+    if YTDLP_PROXY:
+        variants += [{"proxy": YTDLP_PROXY}, {"proxy": YTDLP_PROXY, "impersonate": chrome}]
+
+    first_err: Exception | None = None
+    for extra in variants:
         try:
-            impersonated = {**opts, "impersonate": ImpersonateTarget("chrome")}
-            with yt_dlp.YoutubeDL(impersonated) as ydl:
+            with yt_dlp.YoutubeDL({**opts, **extra}) as ydl:
                 return ydl.extract_info(url, download=True)
-        except yt_dlp.utils.DownloadError:
-            stream = resolve_stream(url, proxy=opts.get("proxy", ""))
-            if stream is None:
-                raise first_err
-            hls_opts = {
-                **opts,
-                "hls_prefer_native": True,
-                "http_headers": {"Referer": url, "User-Agent": BROWSER_UA},
-            }
-            with yt_dlp.YoutubeDL(hls_opts) as ydl:
-                info = ydl.extract_info(stream.url, download=True)
-            if stream.title:  # the m3u8 filename ("master") is a poor title
-                info["title"] = stream.title
-            return info
+        except yt_dlp.utils.DownloadError as err:
+            if first_err is None:
+                first_err = err
+
+    # Last resort: the page hides its stream behind a player iframe with
+    # disguised extensions. Scrape it (through the proxy, since such sites are
+    # usually the blocked ones) and hand the real URL back to yt-dlp.
+    stream = resolve_stream(url, proxy=YTDLP_PROXY)
+    if stream is None:
+        raise first_err
+    hls_opts = {
+        **opts,
+        "proxy": YTDLP_PROXY or None,
+        "hls_prefer_native": True,
+        "http_headers": {"Referer": url, "User-Agent": BROWSER_UA},
+    }
+    with yt_dlp.YoutubeDL(hls_opts) as ydl:
+        info = ydl.extract_info(stream.url, download=True)
+    if stream.title:  # the m3u8 filename ("master") is a poor title
+        info["title"] = stream.title
+    return info
 
 
 def download_worker(job_id: str) -> None:
@@ -131,13 +143,17 @@ def download_worker(job_id: str) -> None:
         "quiet": True,
         "no_warnings": True,
     }
-    if YTDLP_PROXY:
-        opts["proxy"] = YTDLP_PROXY
+    # yt-dlp writes refreshed cookies back to the file, but the mounted copy is
+    # read-only. Work from a per-job writable copy so it can update tokens
+    # (which also helps auth) without touching the source of truth.
     if COOKIES_FILE and os.path.exists(COOKIES_FILE):
-        opts["cookiefile"] = COOKIES_FILE
+        work_cookies = out_dir / "cookies.txt"
+        shutil.copyfile(COOKIES_FILE, work_cookies)
+        opts["cookiefile"] = str(work_cookies)
     try:
         info = run_ytdlp(job["url"], opts)
-        files = sorted(out_dir.iterdir(), key=lambda p: p.stat().st_size, reverse=True)
+        media = [p for p in out_dir.iterdir() if p.name != "cookies.txt"]
+        files = sorted(media, key=lambda p: p.stat().st_size, reverse=True)
         if not files:
             raise RuntimeError("download produced no file")
         job["filepath"] = str(files[0])
@@ -193,15 +209,20 @@ async def extract_url(request: Request) -> str:
     parsing. Accepting form/plain-text bodies and stripping backslashes makes
     the endpoint forgiving of that, while still supporting a JSON body.
     """
+    # Read the raw body exactly once. Starlette caches it, so the json()/form()
+    # helpers below replay this instead of re-consuming the stream (calling
+    # them first would leave a later body() read raising "Stream consumed").
+    body = await request.body()
     content_type = request.headers.get("content-type", "")
     url = ""
+
     if "application/json" in content_type:
         try:
-            data = await request.json()
+            data = json.loads(body)
             if isinstance(data, dict):
                 url = str(data.get("url", ""))
-        except (json.JSONDecodeError, ValueError):
-            url = ""  # fall through to raw-body salvage below
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            url = ""  # fall through to salvage below
     elif "form" in content_type:
         form = await request.form()
         url = str(form.get("url", ""))
@@ -209,10 +230,10 @@ async def extract_url(request: Request) -> str:
     if not url:
         url = request.query_params.get("url", "")
     if not url:
-        # Last resort: treat the raw body as the URL, or dig it out of a
-        # body that failed JSON parsing because of bad escapes.
-        raw = (await request.body()).decode("utf-8", "replace")
-        match = re.search(r"https?:[^\s\"']+", raw.replace("\\", ""))
+        # Salvage: pull the first URL out of the raw body, tolerating the bad
+        # backslash escapes that broke JSON parsing.
+        raw = body.decode("utf-8", "replace").replace("\\", "")
+        match = re.search(r"https?:[^\s\"']+", raw)
         url = match.group(0) if match else raw
 
     return url.replace("\\", "").strip()
