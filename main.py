@@ -5,10 +5,12 @@ serves the file to the client exactly once, then deletes it.
 Nothing is kept on disk beyond FILE_TTL_SECONDS as a safety net.
 
 Endpoints (all require X-API-Key header):
-    POST /jobs            url via JSON body, form field, ?url=, or raw body
-                          -> {"id": "..."}
-    GET  /jobs/{id}       -> {"status": "queued|downloading|done|error|delivered|expired", "progress": 42.0, ...}
-    GET  /jobs/{id}/file  -> the video file (deleted from server after transfer)
+    POST /jobs               url via JSON body, form field, ?url=, or raw body
+                             -> {"id": "..."}
+    GET  /jobs/{id}          -> {"status": "...", "progress": 42.0, "count": N, ...}
+    GET  /jobs/{id}/file     -> the primary (largest) video file
+    GET  /jobs/{id}/file/{i} -> the i-th video (0-based) for multi-video posts
+    Files are swept from the server a short grace period after delivery.
 """
 
 import asyncio
@@ -153,10 +155,12 @@ def download_worker(job_id: str) -> None:
     try:
         info = run_ytdlp(job["url"], opts)
         media = [p for p in out_dir.iterdir() if p.name != "cookies.txt"]
+        # A single post can hold several videos; keep them all, largest first.
         files = sorted(media, key=lambda p: p.stat().st_size, reverse=True)
         if not files:
             raise RuntimeError("download produced no file")
-        job["filepath"] = str(files[0])
+        job["files"] = [str(p) for p in files]
+        job["filepath"] = str(files[0])  # primary; kept for the un-indexed /file route
         job["title"] = (info or {}).get("title", "video")
         job["progress"] = 100.0
         job["status"] = "done"
@@ -251,6 +255,7 @@ async def create_job(request: Request) -> dict:
         "progress": 0.0,
         "error": None,
         "filepath": None,
+        "files": [],
         "title": None,
         "created_at": time.time(),
         "delivered_at": None,
@@ -270,24 +275,27 @@ def get_job(job_id: str) -> dict:
         "progress": job["progress"],
         "title": job["title"],
         "error": job["error"],
+        "count": len(job["files"]),  # number of downloadable videos in this job
     }
 
 
-@app.get("/jobs/{job_id}/file", dependencies=[Depends(require_key)])
-def get_file(job_id: str) -> FileResponse:
+def _serve_file(job_id: str, index: int) -> FileResponse:
     job = jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
     if job["status"] not in ("done", "delivered"):
         raise HTTPException(status_code=409, detail=f"job status is {job['status']}")
-    path = Path(job["filepath"])
+    if not 0 <= index < len(job["files"]):
+        raise HTTPException(status_code=404, detail="file index out of range")
+    path = Path(job["files"][index])
     if not path.exists():
         job["status"] = "expired"
         raise HTTPException(status_code=410, detail="file already deleted")
 
     def mark_delivered() -> None:
-        # Not deleted yet: the sweeper removes it DELIVERED_GRACE_SECONDS
-        # later, leaving a retry window for interrupted transfers.
+        # Files aren't deleted here; the sweeper removes the whole job dir
+        # DELIVERED_GRACE_SECONDS later. That window lets the client pull every
+        # file of a multi-video post and retry interrupted transfers.
         job["delivered_at"] = time.time()
         job["status"] = "delivered"
 
@@ -297,6 +305,18 @@ def get_file(job_id: str) -> FileResponse:
         filename=path.name,
         background=BackgroundTask(mark_delivered),
     )
+
+
+@app.get("/jobs/{job_id}/file", dependencies=[Depends(require_key)])
+def get_file(job_id: str) -> FileResponse:
+    # Primary (largest) file — unchanged single-video behavior.
+    return _serve_file(job_id, 0)
+
+
+@app.get("/jobs/{job_id}/file/{index}", dependencies=[Depends(require_key)])
+def get_file_indexed(job_id: str, index: int) -> FileResponse:
+    # Nth video of a multi-video post (0-based).
+    return _serve_file(job_id, index)
 
 
 @app.get("/health")

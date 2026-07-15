@@ -89,11 +89,14 @@ Create a new shortcut in the Shortcuts app:
       with the `X-API-Key` header
    3. **Get Dictionary Value** — key `status`
    4. **If** status **is** `done`:
-      - **Get Contents of URL** — GET
-        `https://dl.example.com/jobs/<job id>/file` with the `X-API-Key`
-        header (this downloads the video; may take a while on cellular)
-      - **Save to Photo Album**
-      - **Show Notification** — "Saved ✅"
+      - **Get Dictionary Value** — key `count` (how many videos the post had)
+      - **Repeat with Each** over a list `0 … count-1`, or simply
+        **Repeat** `count` times using the index (0-based):
+        - **Get Contents of URL** — GET
+          `https://dl.example.com/jobs/<job id>/file/<index>` with the
+          `X-API-Key` header (downloads that video)
+        - **Save to Photo Album**
+      - **Show Notification** — "Saved <count> ✅"
       - **Stop This Shortcut**
    5. **If** status **is** `error`:
       - **Get Dictionary Value** — key `error` → **Show Notification**
