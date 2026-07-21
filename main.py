@@ -61,6 +61,39 @@ FORMAT = (
 jobs: dict[str, dict] = {}
 executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_DOWNLOADS)
 
+# Map noisy yt-dlp / network errors to short, user-facing messages (shown in the
+# iOS Shortcut). Matching is case-insensitive and order matters: the first
+# needle found in the raw error wins, so list more specific phrases first.
+# Anything unmatched falls through to the raw yt-dlp text so failures stay
+# debuggable on the client too.
+FRIENDLY_ERRORS: tuple[tuple[str, str], ...] = (
+    ("protected tweet", "비공개(잠긴) 계정의 트윗이라 받을 수 없어요."),
+    ("not authorized to view", "비공개(잠긴) 계정의 트윗이라 받을 수 없어요."),
+    ("no video could be found", "이 게시물에는 영상이 없어요 (이미지·텍스트만 있는 글일 수 있어요)."),
+    ("unsupported url", "지원하지 않는 페이지예요 (영상 링크를 찾지 못했어요)."),
+    ("confirm your age", "로그인이 필요한 영상이에요 (로그인/연령 제한)."),
+    ("sign in to confirm", "로그인이 필요한 영상이에요 (로그인 확인이 필요해요)."),
+    ("private video", "비공개 영상이에요."),
+    ("http error 403", "서버가 접근을 차단했어요 (403)."),
+    ("forbidden", "서버가 접근을 차단했어요 (403)."),
+    ("has been removed", "삭제된 영상이에요."),
+    ("no longer available", "영상을 더 이상 볼 수 없어요."),
+    ("video unavailable", "영상을 더 이상 볼 수 없어요."),
+)
+
+
+def friendly_error(raw: str) -> str:
+    """Turn a raw yt-dlp/network error into a short message for the client.
+
+    Unknown errors pass through (truncated) so unmapped failures remain
+    diagnosable from the client without a server log round-trip.
+    """
+    lowered = raw.lower()
+    for needle, message in FRIENDLY_ERRORS:
+        if needle in lowered:
+            return message
+    return raw[:500]
+
 
 def require_key(x_api_key: str = Header(default="")) -> None:
     if not API_KEY or x_api_key != API_KEY:
@@ -166,10 +199,13 @@ def download_worker(job_id: str) -> None:
         job["status"] = "done"
         notify(f"Ready: {job['title']}")
     except Exception as exc:  # yt-dlp raises many exception types
+        raw = str(exc)
         job["status"] = "error"
-        job["error"] = str(exc)[:500]
+        job["error"] = friendly_error(raw)
         shutil.rmtree(out_dir, ignore_errors=True)
-        notify(f"Failed: {job['url']} — {job['error'][:100]}")
+        # Admin notification keeps the raw error for debugging; the client sees
+        # the friendly message via GET /jobs/{id}.
+        notify(f"Failed: {job['url']} — {raw[:150]}")
 
 
 async def sweep_expired() -> None:
