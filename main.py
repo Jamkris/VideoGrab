@@ -148,7 +148,9 @@ def run_ytdlp(url: str, opts: dict) -> dict:
         **opts,
         "proxy": YTDLP_PROXY or None,
         "hls_prefer_native": True,
-        "http_headers": {"Referer": url, "User-Agent": BROWSER_UA},
+        # Some CDNs gate the stream on a specific Referer (not the page URL);
+        # the resolver reports which one made the playlist verify.
+        "http_headers": {"Referer": stream.referer or url, "User-Agent": BROWSER_UA},
     }
     with yt_dlp.YoutubeDL(hls_opts) as ydl:
         info = ydl.extract_info(stream.url, download=True)
