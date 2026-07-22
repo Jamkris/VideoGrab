@@ -313,6 +313,10 @@ def get_job(job_id: str, request: Request) -> dict:
     proto = request.headers.get("x-forwarded-proto", request.url.scheme)
     host = request.headers.get("host", request.url.netloc)
     file_urls = [f"{proto}://{host}/jobs/{job_id}/file/{i}" for i in range(len(job["files"]))]
+    # Real saved filenames (title + extension), parallel to file_urls, so the
+    # iOS Shortcut can name each downloaded file itself — it doesn't read the
+    # Content-Disposition header the /file route already sends.
+    filenames = [Path(p).name for p in job["files"]]
     return {
         "id": job_id,
         "status": job["status"],
@@ -321,6 +325,8 @@ def get_job(job_id: str, request: Request) -> dict:
         "error": job["error"],
         "count": len(job["files"]),  # number of downloadable videos in this job
         "file_urls": file_urls,      # one direct download URL per video
+        "filename": filenames[0] if filenames else None,  # primary file's name
+        "filenames": filenames,      # one saved filename per video, matches file_urls
     }
 
 
