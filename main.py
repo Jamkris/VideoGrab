@@ -7,7 +7,8 @@ Nothing is kept on disk beyond FILE_TTL_SECONDS as a safety net.
 Endpoints (all require X-API-Key header):
     POST /jobs               url via JSON body, form field, ?url=, or raw body
                              -> {"id": "..."}
-    GET  /jobs/{id}          -> {"status": "...", "progress": 42.0, "count": N, ...}
+    GET  /jobs/{id}          -> {"status": "...", "progress": 42.0, "count": N,
+                                 "files": [{"index", "url", "filename"}], ...}
     GET  /jobs/{id}/file     -> the primary (largest) video file
     GET  /jobs/{id}/file/{i} -> the i-th video (0-based) for multi-video posts
     Files are swept from the server a short grace period after delivery.
@@ -317,6 +318,14 @@ def get_job(job_id: str, request: Request) -> dict:
     # iOS Shortcut can name each downloaded file itself — it doesn't read the
     # Content-Disposition header the /file route already sends.
     filenames = [Path(p).name for p in job["files"]]
+    # Self-contained record per video. Pairing a URL with its filename by
+    # position across two arrays forces the client into index math, which is
+    # exactly where the iOS Shortcut breaks (a nested Repeat's index silently
+    # binds to the wrong loop). Iterating this list needs no index at all.
+    files = [
+        {"index": i, "url": url, "filename": name}
+        for i, (url, name) in enumerate(zip(file_urls, filenames))
+    ]
     return {
         "id": job_id,
         "status": job["status"],
@@ -324,6 +333,7 @@ def get_job(job_id: str, request: Request) -> dict:
         "title": job["title"],
         "error": job["error"],
         "count": len(job["files"]),  # number of downloadable videos in this job
+        "files": files,              # one {index, url, filename} per video — iterate this
         "file_urls": file_urls,      # one direct download URL per video
         "filename": filenames[0] if filenames else None,  # primary file's name
         "filenames": filenames,      # one saved filename per video, matches file_urls

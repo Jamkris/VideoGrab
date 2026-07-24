@@ -52,7 +52,7 @@ All endpoints require the `X-API-Key` header.
 | Method | Path              | Description                                     |
 |--------|-------------------|-------------------------------------------------|
 | POST   | `/jobs`           | URL via JSON `{"url"}`, form field, `?url=`, or raw body → `{"id"}` |
-| GET    | `/jobs/{id}`      | `{"status", "progress", "title", "error"}`       |
+| GET    | `/jobs/{id}`      | `{"status", "progress", "title", "error", "count", "files"}` |
 | GET    | `/jobs/{id}/file` | The video file; deleted from server after send   |
 
 Status values: `queued → downloading → done → delivered` (or `error` /
@@ -89,15 +89,22 @@ Create a new shortcut in the Shortcuts app:
       with the `X-API-Key` header
    3. **Get Dictionary Value** — key `status`
    4. **If** status **is** `done`:
-      - **Get Dictionary Value** — key `count` (how many videos the post had)
-      - **Repeat with Each** over a list `0 … count-1`, or simply
-        **Repeat** `count` times using the index (0-based):
-        - **Get Contents of URL** — GET
-          `https://dl.example.com/jobs/<job id>/file/<index>` with the
-          `X-API-Key` header (downloads that video)
+      - **Get Dictionary Value** — key `files` (a list, one entry per video)
+      - **Repeat with Each** over that list:
+        - **Get Dictionary Value** — key `url` from **Repeat Item**
+        - **Get Contents of URL** — GET that url with the `X-API-Key` header
+          (downloads that video)
         - **Save to Photo Album**
       - **Show Notification** — "Saved <count> ✅"
       - **Stop This Shortcut**
+
+      Iterate `files` with **Repeat Item**, never with `Repeat Index`. This
+      block sits inside the polling repeat, and in nested repeats Shortcuts
+      hands you two `Repeat Index` variables — picking the outer one indexes
+      the file list by the poll count and throws "the index you specified was
+      outside of the possible range". Each entry carries its own `url`,
+      `filename`, and `index`, so no index math is needed. (`file_urls` /
+      `filenames` remain as parallel arrays for existing shortcuts.)
    5. **If** status **is** `error`:
       - **Get Dictionary Value** — key `error` → **Show Notification**
       - **Stop This Shortcut**
